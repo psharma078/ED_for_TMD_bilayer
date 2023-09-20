@@ -158,7 +158,7 @@ def Vk1k2k3k4(qlist):
 
     for q in qlist:
         V_q = 0
-        q_norm = np.linalg.norm(q@np.array([Q1,Q2])) #per Angstrom
+        q_norm = np.linalg.norm(q @ np.array([Q1,Q2])) #per Angstrom
         if q_norm == 0.0:
             V_q = 0
         else:

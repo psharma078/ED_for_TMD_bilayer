@@ -8,7 +8,7 @@ import multiprocessing
 
 num_cores = multiprocessing.cpu_count()
 
-Ncutoff = 10
+Ncutoff = 1
 #-------parameters---------------------
 #theta = 4.4
 #theta = theta*pi/180.0

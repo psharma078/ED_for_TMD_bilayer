@@ -7,9 +7,9 @@ theta = theta*pi/180.0
 ao = 3.52
 aM = ao/theta
 
-Lx = 5
+Lx = 3
 Ly = 3
-Nup_particles = 5
+Nup_particles = 3
 
 def moire_length():
     return aM
