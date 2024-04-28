@@ -1,0 +1,28 @@
+# Download miniconda using wget https:....   or directly from https://docs.anaconda.com/free/miniconda/index.html
+sh Miniconda3....sh
+conda init --reverse $SHELL
+#check conda environment using
+conda env list
+conda update --all
+conda create -n default
+conda activate default
+#install all the libraries in once using
+conda install -c conda-forge numpy scipy matplotlib joblib cython numba "libblash=*=*mkl"
+#put the following conda setup in .bashrc
+
+# >>> conda initialize >>>
+# !! Contents within this block are managed by 'conda init' !!
+__conda_setup="$('/home/yangpeng/miniconda3/bin/conda' 'shell.bash' 'hook' 2> /dev/null)"
+if [ $? -eq 0 ]; then
+    eval "$__conda_setup"
+else
+    if [ -f "/home/yangpeng/miniconda3/etc/profile.d/conda.sh" ]; then
+        . "/home/yangpeng/miniconda3/etc/profile.d/conda.sh"
+    else
+        export PATH="/home/yangpeng/miniconda3/bin:$PATH"
+    fi
+fi
+unset __conda_setup
+# <<< conda initialize <<<
+
+source .bashrc
