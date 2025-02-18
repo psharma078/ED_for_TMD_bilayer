@@ -85,6 +85,16 @@ def main(theta, N1, N2, Nup, Vd):
         Delta_T = -w*(delta_nn_mm + delta_nnm1_mmm1 + delta_nn_mmm1)
         return Delta_T
 
+    def construct_ham(k):
+        H_top,H_bottom = gen_layer_hamiltonian(k)
+        Delta_T = gen_tunneling()
+        ham = np.zeros((ham_dim,ham_dim),dtype=np.complex128)
+        ham[:halfdim,:halfdim] = H_top
+        ham[halfdim:,halfdim:] = H_bottom
+        ham[:halfdim,halfdim:] = Delta_T.conj().T
+        ham[halfdim:,:halfdim] = Delta_T#.conj().T
+        return ham
+
     def compute_F_mat(klist, dk):
         k12list = np.zeros_like(klist,dtype=np.float64)
         k12list[:,0] = klist[:,0]/N1
