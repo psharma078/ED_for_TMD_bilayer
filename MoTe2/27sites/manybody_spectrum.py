@@ -10,30 +10,25 @@ import multiprocessing
 from itertools import combinations, permutations, repeat
 from numba import jit,njit
 from numba.typed import List
-#from pylanczos import PyLanczos
+from pylanczos import PyLanczos
 import time
 import sys
-import csv
 
 num_cores = multiprocessing.cpu_count()
 
-epsilon_r = 10 ##float(sys.argv[1])  #coulomb parameter
+epsilon_r = float(sys.argv[1])  #coulomb parameter
 
-def main(theta, Nup, Vd):
+def main(theta, N1, N2, Nup, Vd):
     theta = theta/180*pi
     a0 = 3.52e-10
-    aM = a0/(2*np.sin(theta/2))
-    gvecs = g_vecs(theta, aM)
+    gvecs = g_vecs(theta, a0)
     Q1,Q2 = reciprocal_vecs(gvecs)
+    aM = a0/(2*np.sin(theta/2))
     kappa_p = (2 * Q1 + Q2)/3
     kappa_m = (Q1 - Q2)/3
     mpt=  Q1/2
 
-    T1, T2, mnklist = specialFor27sites(aM)
-    klist_lookup = {tuple(value): index for index, value in enumerate(mnklist)}
-    Nk = 8 #cutoff number [-Nk:Nk]*Q2 + [-Nk:Nk]*Q3
-    N1 = 9
-    N2 = 3
+    Nk = 1 #cutoff number [-Nk:Nk]*Q2 + [-Nk:Nk]*Q3
 
     n_k34 = N1*N2
     n_g = (2*Nk+1)**2
@@ -57,32 +52,20 @@ def main(theta, Nup, Vd):
 
     halfdim = (Nk*2+1)**2
     ham_dim = 2*halfdim
-
-    ### kline Gamma -- k+ -- M -- Gamma -- k-
-    def special_kline(npts):
-        Gammapt = np.array([0.,0.])
-        mpt = Q1/2
-        kline0 = klines(Gammapt, kappa_p, npts)
-        kline1 = klines(kappa_p,mpt,npts)
-        kline2 = klines(mpt,Gammapt,npts)
-        kline3 = klines(Gammapt,kappa_m, npts)
-        klabels = [r"$\gamma$", r'$\kappa_+$', r'$m$', r'$\gamma$', r'$\kappa_-$']
-        kcoord = np.array([0,(npts-1),2*(npts-1),3*(npts-1)+1,4*(npts-1)+1])
-        return np.concatenate((kline0[:-1,:],kline1[:-1,:],kline2[:-1,:],kline3[:,:])), kcoord, klabels
-
-    def gen_layer_hamiltonian(k):
+    
+    def gen_layer_hamiltonian(k, delk):
         me = 9.10938356e-31 # kg
         m = 0.62*me
         hbar = 1.054571817e-34
         J_to_meV = 6.24150636e21  #meV
         prefactor = hbar**2/(2*m)*J_to_meV
-        kxlist_top = Qxlist + k[0] - kappa_p[0]
-        kylist_top = Qylist + k[1] - kappa_p[1]
-        kxlist_bottom = Qxlist + k[0] - kappa_m[0]
-        kylist_bottom = Qylist + k[1] - kappa_m[1]
+        kxlist_top = Qxlist + (k[0] + delk[0]) - kappa_p[0]
+        kylist_top = Qylist + (k[1] + delk[1]) - kappa_p[1]
+        kxlist_bottom = Qxlist + (k[0] + delk[0]) - kappa_m[0]
+        kylist_bottom = Qylist + (k[1] + delk[1]) - kappa_m[1]
         # First add potential terms
         psi = -91/180.0*pi
-        V = 11.2 # meV
+        V = 11.2 # meVfrom joblib import Parallel, delayed
 
         H_top = -V*(delta_nn_mmp1 + delta_nnp1_mm + delta_nnm1_mmm1)*exp(1j*psi)
         H_top += H_top.conj().T
@@ -102,34 +85,33 @@ def main(theta, Nup, Vd):
         Delta_T = -w*(delta_nn_mm + delta_nnm1_mmm1 + delta_nn_mmm1)
         return Delta_T
 
-    def construct_ham(k):
-        H_top,H_bottom = gen_layer_hamiltonian(k)
+    def construct_ham(k, delk):
+        H_top,H_bottom = gen_layer_hamiltonian(k, delk)
         Delta_T = gen_tunneling()
         ham = np.zeros((ham_dim,ham_dim),dtype=np.complex128)
         ham[:halfdim,:halfdim] = H_top
         ham[halfdim:,halfdim:] = H_bottom
         ham[:halfdim,halfdim:] = Delta_T.conj().T
-        ham[halfdim:,:halfdim] = Delta_T#.conj().T
+        ham[halfdim:,:halfdim] = Delta_T##.conj().T
         return ham
-
-    def compute_F_mat():
-        #k12list = np.zeros_like(klist,dtype=np.float64)
-        #k12list[:,0] = klist[:,0]/N1
-        #k12list[:,1] = klist[:,1]/N2
-        #kxylist = k12list @ np.array([Q1,Q2])
-        kxylist = mnklist @ np.array([T1, T2])
+    
+    def compute_F_mat(klist, dk):
+        k12list = np.zeros_like(klist,dtype=np.float64)
+        k12list[:,0] = klist[:,0]/N1
+        k12list[:,1] = klist[:,1]/N2
+        kxylist = k12list @ np.array([Q1,Q2])
         #################################################################
         ## Solve for up spin
-        solver = lambda k: eigh_sorted(construct_ham(k))
+        solver = lambda k: eigh_sorted(construct_ham(k, dk))
         result = Parallel(n_jobs=num_cores)(delayed(solver)(k) for k in kxylist)
         dim = n_g *2  #including layer index
+        
+        singleVec = np.array([result[jj][1] for jj in range(n_k34)])
+        singleVec = singleVec[:,:,-1]
 
-        EEup = np.array([result[jj][0] for jj in range(n_k34)])##.reshape([N1,N2,dim],order='F')[:,:,-1] #[:,:,-1] for only the ground state
-        print("single k, EEup")
-        for x in range(len(mnklist)):
-            print(mnklist[x], EEup[x][-1])
-        EEup = EEup.reshape([N1,N2,dim],order='F')[:,:,-1]
-
+        EEup = np.array([result[jj][0] for jj in range(n_k34)]).reshape([N1,N2,dim],order='F')[:,:,-1] #[:,:,-1] for only the ground state
+        ##print("single EEup:", EEup)
+    
         VV = np.array([result[jj][1] for jj in range(n_k34)], dtype=np.complex128).reshape([N1,N2,2*Nk+1, 2*Nk+1, 2, dim],order='F')[:,:,:,:,:,-1]
         Fmat = np.zeros([N1,N2,N1,N2,2*Nk+1,2*Nk+1], dtype=np.complex128)
         Fmat[:,:,:,:,Nk,Nk] = np.einsum('abmnl,cdmnl->abcd', VV[:,:,:,:,:].conj(), VV[:,:,:,:,:])
@@ -147,169 +129,184 @@ def main(theta, Nup, Vd):
             Fmat[:,:,:,:,Nk,Nk-jj] = np.einsum('abmnl,cdmnl->abcd', VV[:,:,:,:(-jj),:].conj(), VV[:,:,:,jj:,:])
         Fmat_up = Fmat.reshape(N1*N2,N1*N2,(2*Nk+1)**2,order='F')
         #################################################################
-        return Fmat_up.flatten(order='F'), EEup
-
+        return Fmat_up.flatten(order='F'), EEup, singleVec 
+    
+    @njit
     def find_id_in_klist(braket_k):
-        kid = np.array([klist_lookup[tuple(bk)] for bk in braket_k])
-        return kid
-
-
+        return braket_k[:,0]+N1*braket_k[:,1]
+    @njit
     def find_id_in_glist(g_k):
         g_k += Nk
         return g_k[:,0]+(2*Nk+1)*g_k[:,1]
-
+    
     #################################
     ## CHECK INDICES
-    fname1 = 'k3plus_q_nk=8_nh=9.txt'
-    fname2 = 'k4minus_q_nk=8_nh=9.txt'
-    k3_p_q, g_k3pq, k3q_braket = readfile(fname1)
-    k4_m_q, g_k4mq, k4q_braket = readfile(fname2)
-    k3q_lookup = {tuple(value): index for index, value in enumerate(k3_p_q)}
-    k4q_lookup = {tuple(value): index for index, value in enumerate(k4_m_q)}
 
-    def get_k_q_ids(k3_id,k4_id,mnklist,qlist):
-        k3_q = mnklist[k3_id] + qlist
-        k4_q = mnklist[k4_id] - qlist
-        k3qID = np.array([k3q_lookup[tuple(k3q)] for k3q in k3_q])
-        k4qID = np.array([k4q_lookup[tuple(k4q)] for k4q in k4_q])
-        g_k3_q = g_k3pq[k3qID]
-        braket_k3_q = k3q_braket[k3qID]
-        g_k4_q = g_k4mq[k4qID]
-        braket_k4_q = k4q_braket[k4qID]
+    @njit
+    def get_k_q_ids(k3_id,k4_id,klist,qlist):
+        k3_q = klist[k3_id] + qlist
+        k4_q = klist[k4_id] - qlist
+        g_k3_q, braket_k3_q = compute_reduce_k(k3_q,N1,N2)
+        g_k4_q, braket_k4_q = compute_reduce_k(k4_q,N1,N2)
         k3_q_id = find_id_in_klist(braket_k3_q)
         k4_q_id = find_id_in_klist(braket_k4_q)
         g_k3_q_id = find_id_in_glist(g_k3_q)
         g_k4_q_id = find_id_in_glist(g_k4_q)
         return k3_q_id, g_k3_q_id, k4_q_id, g_k4_q_id
-
-    def compute_coulomb(k3_id,k4_id,mnklist,qlist, Fmat1,Fmat2, Vlist):
-        k3_q_id, g_k3_q_id, k4_q_id, g_k4_q_id = get_k_q_ids(k3_id,k4_id,mnklist,qlist)
+    
+    @njit
+    def compute_coulomb(k3_id,k4_id,klist,qlist,Fmat1,Fmat2, Vlist):
+        k3_q_id, g_k3_q_id, k4_q_id, g_k4_q_id = get_k_q_ids(k3_id,k4_id,klist,qlist)
         ind_k = (g_k3_q_id<n_g) & (g_k3_q_id>=0) & (g_k4_q_id<n_g) & (g_k4_q_id>=0) & (k3_q_id < k4_q_id)
         k3_q_id = k3_q_id[ind_k]
         k4_q_id = k4_q_id[ind_k]
-        V = Fmat1[g_k3_q_id[ind_k]*n_k34**2 + k3_id*n_k34 + k3_q_id] * Fmat2[g_k4_q_id[ind_k]*n_k34**2 + k4_id*n_k34 + k4_q_id] * Vlist[ind_k]
+        V = Fmat1[g_k3_q_id[ind_k]*n_k34**2 + k3_id*n_k34 + k3_q_id] * Fmat2[g_k4_q_id[ind_k]*n_k34**2 + k4_id*n_k34 + k4_q_id] * Vlist[ind_k] 
+        # V = Fmat1[k3_q_id*n_g*n_k34 + k3_id*n_g + g_k3_q_id[ind_k]] * Fmat2[k4_q_id*n_g*n_k34 + k4_id*n_g + g_k4_q_id[ind_k]] * Vlist[ind_k] #
         k1k2list = np.vstack((k3_q_id,k4_q_id)).T
         k1k2, k1k2_ids =  two_index_unique(k1k2list,n_k34)
         Vk1k2 = List()
         for k_id in k1k2_ids:
             Vk1k2.append(np.sum(V[k_id]))
-        #print(Vk1k2)
         return Vk1k2, k1k2
 
     def coulomb_potential(qlist):
         zeroidx = np.nonzero(np.prod(qlist==0,axis=1))[0][0]
-        #qxy = np.zeros_like(qlist,dtype=np.float64)
-        #qxy[:,0] = qlist[:,0]/N1
-        #qxy[:,1] = qlist[:,1]/N2
-        qxy = qlist @ np.array([T1,T2]) # in m^-1
+        qxy = np.zeros_like(qlist,dtype=np.float64)
+        qxy[:,0] = qlist[:,0]/N1
+        qxy[:,1] = qlist[:,1]/N2
+        qxy = qxy @ np.array([Q1,Q2]) # in m^-1
         absqlist = np.linalg.norm(qxy,axis=1)
+
         k0 = 8.99e9
         J_to_meV = 6.242e21  #meV
         e_charge = 1.602e-19 # coulomb
-        #epsilon = 8.854e-12
-        #epsilon_r = 5
         Area = np.sqrt(3)/2*N1*N2*aM**2
-        Vc = 2*np.pi*e_charge**2/(epsilon_r*absqlist)*J_to_meV/Area*k0
+        Vc = 2*np.pi*e_charge**2/(epsilon_r*absqlist)*J_to_meV/Area*k0  
+    
         Vc[zeroidx]=0
-
         return Vc
-
-
-    def create_table_k1234_from_k3k4(ii,jj,mnklist, qlist, Fmat_1, Fmat_2, Vlist):
-        k1k2k3k4 = []
-        Vk1k2, k1k2 = compute_coulomb(ii,jj,mnklist,qlist,Fmat_1, Fmat_2, Vlist)
+         
+    @njit
+    def create_table_k1234_from_k3k4(ii,jj,klist, qlist, Fmat_1, Fmat_2, Vlist):
+        k1k2k3k4 = List()
+        Vk1k2, k1k2 = compute_coulomb(ii,jj,klist,qlist,Fmat_1, Fmat_2, Vlist)
         for kk in k1k2:
             k1k2k3k4.append(np.concatenate((kk,np.array([ii,jj]))))
         return k1k2k3k4, Vk1k2
-
-    def coulomb_matrix_elements(mnklist,qlist, Vlist, Fmat_up):
-        k1234_upup = []
-        Vc_upup = []
+    @njit
+    def coulomb_matrix_elements(qlist, Vlist, Fmat_up):
+        k1234_upup = List() 
+        Vc_upup = List()
         for ii in range(n_k34):
             for jj in range(ii):
                 ##########################
                 ### ii neq jj
-                _,Vk1234_temp = create_table_k1234_from_k3k4(ii,jj,mnklist,qlist,Fmat_up, Fmat_up, Vlist)
+                _,Vk1234_temp = create_table_k1234_from_k3k4(ii,jj,klist,qlist,Fmat_up, Fmat_up, Vlist)
                 #k1234_upup.append(k1k2k3k4)
                 #Vc_upup.append(Vk1234)
-                k1k2k3k4,Vk1234 = create_table_k1234_from_k3k4(jj,ii,mnklist,qlist, Fmat_up, Fmat_up, Vlist)
+                k1k2k3k4,Vk1234 = create_table_k1234_from_k3k4(jj,ii,klist,qlist,Fmat_up, Fmat_up, Vlist)
                 k1234_upup.append(k1k2k3k4)
                 #Vc_upup.append(Vk1234)
-                Vc_temp = []
+                Vc_temp = List()
                 for ll in range(len(Vk1234)):
                     Vc_temp.append(2*(Vk1234[ll] - Vk1234_temp[ll]))
                 Vc_upup.append(Vc_temp)
-        return k1234_upup, Vc_upup
 
+        return k1234_upup, Vc_upup
+    
     def create_coulomb_table(k1234_upup, Vc_upup):
         return np.vstack(k1234_upup), np.hstack(Vc_upup)
+    
+    def diagonalization(klist, qlist, Vlist, binary_lists, configGID, dk):
+        Fmat_up, EEup, singleVec = compute_F_mat(klist, dk)
+        singleE = binary_lists @ EEup.flatten(order='F')
+        k1234_upup, Vc_upup = coulomb_matrix_elements(qlist, Vlist, Fmat_up)
+        k1234_upup, Vc_upup = create_coulomb_table(k1234_upup, Vc_upup)
+        Evecs = []
+        Len = len(configGID)
+        for gid in configGID:
+            Evecs.append(manybody_Hamiltonian(Len, gid, up_configs, singleE, k1234_upup, np.array(Vc_upup, dtype=np.complex128)))
+        if Len==1: Evecs = Evecs[0]
+        return Evecs, singleVec
 
-    qlist, klist = sample_q(N1,N2,Nk, mnklist)
-
+    klist, qlist = sample_k_q(N1,N2,Nk)
     Vlist = coulomb_potential(qlist)
-    Fmat_up, EEup = compute_F_mat()
-    print()
-    k1234_upup, Vc_upup = coulomb_matrix_elements(mnklist,qlist, Vlist, Fmat_up)
-    k1234_upup, Vc_upup = create_coulomb_table(k1234_upup, Vc_upup)
-
+    
     up_configs = np.array(bitstring_config(n_k34,Nup))
-    Ktot, configsGroupID, singleE = groupingKsum(up_configs, mnklist, EEup, N1, N2, Nup, Nk)
+    binary_lists = np.fliplr(config_array(up_configs,N1*N2))
+    Ktot, configsGroupID = groupingKsum(binary_lists, klist, N1, N2)
+    
+    #constructing dk grids
+    dTheta = np.linspace(0, 3, 3)#change
+    dTheta_grid = np.array([np.array([th1, th2]) for th1 in dTheta for th2 in dTheta])
+    #print(dTheta_grid)
+    delta_klist = (dTheta_grid/np.array([N1,N2])) @ np.array([Q1, Q2])
+    
+    Gs_Ktot_ind = [0,1,2]#[0,3,6,9,12]#[0, 8, 13]##insert the k index (=k1*N2 + k2)  where gs degeneracy occur
+    configGID = []
+    configurs = []
+    for g in Gs_Ktot_ind:
+        configid = configsGroupID[g]
+        configGID.append(configid)
+        configurs.append(up_configs[configid])
 
-    #Evals = []
-    #for gid in configsGroupID:
-    #    Evals.append(manybody_Hamiltonian(gid, up_configs, singleE, k1234_upup, np.array(Vc_upup, dtype=np.complex128))) #for up up interaction
+    #Vvec, Uvec = [], []
+    #for dk in delta_klist:
+    #   mvec, svec = diagonalization(klist, qlist, Vlist, binary_lists, configGID, dk)
+    #   Vvec.append(mvec)
+    #   Uvec.append(svec)
+    solver = lambda dk: diagonalization(klist, qlist, Vlist, binary_lists, configGID, dk)
+    results = Parallel(n_jobs=num_cores)(delayed(solver)(dk) for dk in delta_klist) 
+    
+    Vvec = [results[i][0] for i in range(len(delta_klist))]
+    Uvec = np.array([results[i][1] for i in range(len(delta_klist))])
+    
+    numstate = len(Vvec[0])
+    results = 0
+    Vecs = []
+    for j in range(numstate):
+        Vecs.append(np.array([Vvec[i][j] for i in range(len(delta_klist))]))
+    del Vvec
 
-    solver = lambda gid: manybody_Hamiltonian(gid, up_configs, singleE, k1234_upup, np.array(Vc_upup, dtype=np.complex128))
-    Evals = Parallel(n_jobs=27)(delayed(solver)(gid) for gid in configsGroupID)
+    bin_list_gs_configs = [binary_lists[configsGroupID[ind]] for ind in Gs_Ktot_ind]
+    if len(Gs_Ktot_ind)==1:
+        solver = lambda jj: manybody_chernnum(bin_list_gs_configs[0], Vecs[jj],Uvec, N1*N2, Nup, n_g*2)
+    else:
+        solver = lambda jj: manybody_chernnum(bin_list_gs_configs[jj], Vecs[jj],Uvec, N1*N2, Nup, n_g*2)
+    results = Parallel(n_jobs=num_cores)(delayed(solver)(jj) for jj in range(numstate))
+    
+    ##cn=manybody_chernnum(bin_list_gs_configs[0], Vecs[0],Uvec, N1*N2, Nup, n_g*2)
+    manybody_cn = np.array([results[i][1] for i in range(numstate)])
+    F12 = np.array([results[i][0] for i in range(numstate)])*2*pi
+    print('Ktot = ',Ktot[Gs_Ktot_ind])
+    print('manybody Chern No. = ',manybody_cn)
+    print('sum of cn =', sum(manybody_cn))
+    print()
+    return F12, dTheta_grid, Ktot[Gs_Ktot_ind]
 
-    return Ktot, Evals
-
-def readfile(file_name):
-    with open(file_name, 'r') as file:
-        data = file.readlines()
-
-    # Process the data
-    xval = []
-    g_x = []
-    x_braket = []
-    for line in data:
-        line = line.strip().strip('[]').split('] [')
-        line = np.array([np.array((line[i].strip('[]').split())).astype(int) for i in range(3)])
-        xval.append(line[0])
-        g_x.append(line[1])
-        x_braket.append(line[2])
-    return np.array(xval), np.array(g_x), np.array(x_braket)
-
-def specialFor27sites(aM):
-    a1 = aM*np.array([sqrt(3)/2,0.5])
-    a2 = aM*np.array([0,1])
-    L1 = 3*(2*a1-a2)
-    L2 = 3*(2*a2-a1)
-    zhat = np.array([0,0,1])
-    A = np.cross(L1,L2)
-    T1 = (2*pi*np.cross(L2,zhat)/A)[:-1]
-    T2 = (-2*pi*np.cross(L1,zhat)/A)[:-1]
-    To = np.array([0, 0])
-    uc = np.array([To, T1, T2])
-    t1 = 2*T2-T1
-    t2 = 2*T1-T2
-    k1list = np.arange(3)
-    k2list = np.arange(3)
-    k12list = np.array([np.array([i,j]) for i in k1list for j in k2list])
-    k12 = k12list@np.array([t1,t2])
-
-    klist = np.array([uc+k for k in k12]).reshape(27,2)
-    mrange = np.concatenate((np.arange(7),np.array([-1,-2,-3])))
-    mnlist = []
-    for m in mrange:
-        for n in mrange:
-            a = m*T1 + n*T2
-            for k in klist:
-                if np.allclose(a,k,atol=1e-6):
-                    mn = np.array([m,n])
-                    mnlist.append(mn)
-
-    return T1, T2, np.array(mnlist)
+def manybody_chernnum(bin_list, Vec, Uvec, N, Np, ng): 
+    #occ_BlochState = np.array([(bin_list[i]==1).nonzero()[0] for i in range(len(bin_list))])
+    occ_BlochState = (bin_list.flatten()==1).nonzero()[0].reshape(len(bin_list),Np) % N
+    delk_len = len(Uvec)
+    len_delk1 = int(np.sqrt(delk_len))
+    Vec = Vec.reshape(len_delk1, len_delk1, len(bin_list))
+    Vx = Vec.conjugate()*np.roll(Vec,-1,axis=0)
+    Vy = Vec.conjugate()*np.roll(Vec,-1,axis=1)
+    del Vec
+    Ux = 0
+    Uy = 0
+    for l in range(len(occ_BlochState)):
+        U_vec = np.array([Uvec[i][occ_BlochState[l]] for i in range(delk_len)]).reshape(len_delk1,len_delk1,Np,ng)
+        Ux += Vx[:,:,l] * np.product(np.sum(U_vec.conjugate() * np.roll(U_vec, -1, axis=0), axis=3), axis=2)
+        Uy += Vy[:,:,l] * np.product(np.sum(U_vec.conjugate() * np.roll(U_vec, -1, axis=1), axis=3), axis=2)
+    
+    Ux = Ux/np.abs(Ux)
+    Uy = Uy/np.abs(Uy)
+    F12 = np.log(Ux * np.roll(Uy,-1,axis=0) / (Uy * np.roll(Ux,-1,axis=1)))[:-1,:-1]
+    F12 = np.imag(F12)/(2*np.pi)
+    #print(F12)
+    mbChernNum = np.sum(F12,axis=(0,1))
+    return F12, mbChernNum
 
 def bz_sampling_k12(N):
     xlist = np.linspace(-1/2,1/2,N+1)
@@ -325,47 +322,22 @@ def bz_sampling(N, Q1, Q2):
 def is_hermitian(matrix):
     return np.allclose(matrix, matrix.conj().T)
 
-def glist_gtrans(Nmax,Nc):
-    p1 = np.array([6,-3])
-    p2 = np.array([-3,6])
-    glist = np.arange(-Nc*Nmax,Nc*Nmax+1,dtype=np.int32)
-    glist = np.array([np.array([glist[ii],glist[jj]]) for jj in range(2*Nc*Nmax+1) for ii in range(2*Nc*Nmax+1)], dtype=np.int32)
-    gtrans = glist@np.array([p1,p2])
-    return glist, gtrans
+@njit
+def compute_reduce_k(k12,N1,N2):
+    gx, x_braket = np.divmod(k12,np.array([N1,N2]))
+    return gx, x_braket
 
-def find_gindex(glist, gtrans, qf, mnklist):
-    qi = qf - gtrans
-    qi_m_klist = qi[:, None, :] - mnklist
-    qnorm = np.linalg.norm(qi_m_klist, axis=2).astype(int)
-    gindex = (qnorm==0).nonzero()[0]
-    if len(gindex)!=1:
-        raise ValueError('Empty index value encountered.')
-        sys.exit()
-    x_braket = qi[gindex].flatten()
-    g_q = glist[gindex].flatten()
-    #print(qf, g_q, x_braket)
-    return g_q, x_braket
-
-def compute_reduce_k(q_list, mnklist, glist, gtrans):
-    solver = lambda qf: find_gindex(glist, gtrans, qf, mnklist)
-    result = np.array(Parallel(n_jobs=num_cores)(delayed(solver)(qf) for qf in q_list))
-    g_q = result[:,0]
-    q_braket = result[:,1]
-    return g_q, q_braket
-
-def sample_q(N1,N2,Nmax, mnklist):
+def sample_k_q(N1,N2,Nmax):
     k1list = np.arange(N1,dtype=np.int32) #*2*np.pi/N12
     k2list = np.arange(N2,dtype=np.int32) #*2*np.pi/N12
     k12list = np.array([np.array([k1list[ii],k2list[jj]]) for jj in range(N2) for ii in range(N1)], dtype=np.int32) # first k1 then k2
     glist = np.arange(-Nmax,Nmax+1,dtype=np.int32)
     glist = np.array([np.array([glist[ii],glist[jj]]) for jj in range(2*Nmax+1) for ii in range(2*Nmax+1)], dtype=np.int32)
-    p1 = np.array([6,-3])
-    p2 = np.array([-3,6])
-    glist1 = np.array([g*p1 for g in glist[:,0]])
-    glist2 = np.array([g*p2 for g in glist[:,1]])
-    glist12 = glist1 + glist2
-    qlist = np.tile(mnklist, [(2*Nmax+1)**2,1]) + np.repeat(glist12,N1*N2, axis=0)
-    return qlist, k12list
+    glist[:,0] *= N1
+    glist[:,1] *= N2
+    qlist = np.tile(k12list, [(2*Nmax+1)**2,1]) + np.repeat(glist,N1*N2, axis=0)
+    return k12list, qlist
+    
 
 def plot_bands(EElist,klist,kcoord,klabels,energy_range=[-200,100]):
     numofk = len(klist)
@@ -378,8 +350,8 @@ def plot_bands(EElist,klist,kcoord,klabels,energy_range=[-200,100]):
     ax.set_xticklabels(klabels)
     return fig,ax
 
-def g_vecs(theta, aM):
-    g1 = np.array([4*pi/(sqrt(3)*aM),0])
+def g_vecs(theta, a0 = 3.52):
+    g1 = np.array([4*pi*theta/(sqrt(3)*a0),0])
     gvecs = []
     for j in range(6):
         gvecs.append(rot_mat(j*pi/3)@g1)
@@ -411,51 +383,18 @@ def find_eigenvalues_eigenstates(hamlist):
         EVlist.append(np.asfortranarray(EV[:,idx]))
     return EElist, EVlist
 
-def chernnum(NB,dim,HH,Q1, Q2, bandidx=None):
-    q1 = 1  # lattice constant along 1
-    q2 = 1  # lattice constant along 2
-    N1 = NB * q2  # Number of pts along 1
-    N2 = NB * q1  # Number of pts along 2
-    N12 = q1*q2*NB; # The length of the side of the sample (squre)
-    k1list = np.arange(N1)/N12#*2*np.pi/N12
-    k2list = np.arange(N2)/N12#*2*np.pi/N12
-
-    # Diagonalizing Hamiltonian at each k
-    k12list = np.array([np.array([k1list[ii],k2list[jj]]) for jj in range(N2) for ii in range(N1)])
-    kxylist = k12list @ np.array([Q1,Q2])
-    solver = lambda k: eigh_sorted(HH(k))[1]
-    VV = np.array(Parallel(n_jobs=6)(delayed(solver)(k) for k in kxylist)).reshape([N1,N2,dim,dim],order='F')
-    if bandidx is not None:
-        VV = VV[:,:,:,bandidx]
-
-    # Computing U1 connection
-    U1 = np.squeeze(np.sum(VV.conj()*np.roll(VV,-1,axis=0),axis=2))
-    U2 = np.squeeze(np.sum(VV.conj()*np.roll(VV,-1,axis=1),axis=2))
-    U1 = U1/np.abs(U1)
-    U2 = U2/np.abs(U2)
-    # Berry Curvature
-    F12 = np.imag(np.log(U1*np.roll(U2,-1,axis=0)*np.conj(np.roll(U1,-1,axis=1))*np.conj(U2)))/(2*np.pi)
-    cn = np.sum(F12,axis=(0,1))
-    return cn
-
 def config_array(configs,Nsys):
     configs_bin = list(map(lambda x: format(x, '0'+str(Nsys)+'b'), configs))
     #print("bin", configs_bin[0])
     return np.array([[int(bit) for bit in binary] for binary in configs_bin])  #convert binary num to array
 
-def groupingKsum(configs, klist, EEup, N1, N2, Nup, Nk):
-    dimH = len(configs)
-    binary_lists = np.fliplr(config_array(configs,N1*N2)) #convert binary num to array
-    #occ_ksum = binary_lists @ klist
-    #glist, gtrans = glist_gtrans(Nk,2)
-    #_,occ_ksum = compute_reduce_k(np.array(occ_ksum), klist, glist, gtrans)
-    _,_,occ_ksum = readfile('reduced_Ksum27_nh='+str(Nup)+'.txt')
-    occ_ksum += np.array([2,2])
-    Ktot, grouped_k = two_index_unique(occ_ksum,N1*N2)
-    Ktot -= np.array([2,2])
-    singleE = binary_lists @ EEup.flatten(order='F')
-    return Ktot,  grouped_k, singleE
-
+def groupingKsum(binary_lists, klist, N1, N2):
+    #binary_lists = np.fliplr(config_array(configs,N1*N2)) #convert binary num to array
+    occ_ksum = binary_lists@klist
+    _,occ_ksum = compute_reduce_k(np.array(occ_ksum),N1,N2) 
+    Ktot, grouped_k = two_index_unique(occ_ksum,N2)
+    #singleE = binary_lists @ EEup.flatten(order='F')
+    return Ktot,  grouped_k
 
 def newconfig_matel(config,k_index,Vcoul):
     fsign, newconfiguration = spinless_fsigns(config,k_index)
@@ -496,7 +435,7 @@ def get_matrixEle(configs, k1234, V1234):
             row.append(config_lookup[newconfig])
     return row, col, Matele
 
-def manybody_Hamiltonian(configs_indx, up_configs, singleE, k1234, V1234):
+def manybody_Hamiltonian(Len, configs_indx, up_configs, singleE, k1234, V1234):
     dimHam = len(configs_indx)
     configs = up_configs[configs_indx]
     rows, cols, mat_ele = get_matrixEle(configs, k1234, V1234)
@@ -504,14 +443,23 @@ def manybody_Hamiltonian(configs_indx, up_configs, singleE, k1234, V1234):
     cols.extend(range(dimHam))
     mat_ele.extend(singleE[configs_indx])
     matrix = sp.csc_matrix((mat_ele, (rows,cols)))
+    Vecs = []
+    Eigs = []
 
-    # shape = (dimHam,dimHam)
-    Eigs = eigsh(matrix,k=6,which='SA',sigma=None,return_eigenvectors=False)
-    Eigs = np.sort(Eigs.real)
-    #engine = PyLanczos(matrix, False, 6)
-    #Eigs,_ = engine.run()
-    #Eigs = Eigs.real
-    return Eigs
+    if Len==1:
+        Eigs, vecs = eigsh(matrix,k=3,which='SA',sigma=None,return_eigenvectors=True)
+        idx = Eigs.argsort()
+        Eigs = Eigs[idx]
+        Vecs = [vecs[:,ID] for ID in idx]
+    elif Len>1:
+        Eigs, Vecs = eigsh(matrix,k=1,which='SA',sigma=None,return_eigenvectors=True)
+        Vecs = Vecs.flatten()
+    
+    #print(Eigs.real)
+    ##engine = PyLanczos(matrix, False, 6)
+    ##Eigs,_ = engine.run()
+    ##Eigs = Eigs.real
+    return Vecs
 
 @njit
 def convert_to_1_id(k1k2list, N):
@@ -535,29 +483,14 @@ def two_index_unique(testarray,N):
     unique_2d = convert_to_2_id(unique_id, N)
     return unique_2d, unique_indices
 
-
+              
 def eigh_sorted(A):
     eigenValues, eigenVectors = np.linalg.eigh(A)
-    idx = eigenValues.argsort()[::-1]
+    idx = eigenValues.argsort()[::-1]   
     eigenValues = eigenValues[idx]
     eigenVectors = eigenVectors[:,idx]
     return eigenValues, eigenVectors
-
-def plot_manybody_energies(klist,N1, Evals):
-    k1 = klist[:,0]
-    k2 = klist[:,1]
-    xvals = k1 + N1 * k2
-    Egs = np.min(np.concatenate(Evals))
-    fig,ax =  plt.subplots(figsize=(4,3))
-    for i, eig in enumerate(Evals):
-        x = np.full(len(eig), xvals[i])
-        ax.scatter(x, np.array(eig)-Egs, c='blue')
-    ax.set_xlabel("$k_1 + N_1 k_2$")
-    ax.set_ylabel("$E-E_{GS}$")
-    ax.set_ylim([-0.1,5.1])
-    #plt.savefig("Energy_N=5x3_nup=3.pdf",dpi=300,bbox_inches='tight')
-    return fig, ax
-
+    
 def getspin(b,i):   #spin (0 or 1) at 'i' in the basis 'b'
     return (b>>i) & 1
 
@@ -567,6 +500,7 @@ def bitflip(b,i):  #Flips bits (1-->0, 0-->1) at loc 'i'
 def lcounter(b,i):  #left_counter: # of '1' in b left to site i
     num = b>>(i+1)
     return bin(num).count('1')
+
 
 def spinless_fsigns(config,indices): #for spinless config Ck1dag Ck2dag Ck4 Ck3
     i = min(indices[0],indices[1])
@@ -601,34 +535,31 @@ def bitstring_config(sys_size, num_particle):
         decimal_numbers.append(int(''.join(binary_str), 2))
     return decimal_numbers
 
-def plot_ED_energies(Ktot, Evals):
-    Evals_array = np.array(Evals)
-    print("ktot,         Eigen values (meV)")
-    for i in range(len(Ktot)):
-        print(Ktot[i], Evals[i])
-    minE = Evals_array.min()
-    maxE = Evals_array.max()
-    print()
-    print("Eigenvalues sorted")
-    print(np.sort(Evals_array.flatten()))
-    k1Dlist = np.array([20,26,10,15,23,0,8,13,18,25,3,11,16,21,1,6,14,19,24,4,9,17,22,2,7,12,5])
-    fig, ax = plt.subplots(figsize=(3,2.5))
-    ax.plot(k1Dlist, (Evals_array - minE),'k.',markersize=10)
-    ax.set_ylabel(r'$E - E_{GS}(meV)$', fontsize=12)
-    ax.set_xlabel(r'$k_1 N_2 + k_2$', fontsize=12)
-    ax.set_ylim([-0.1,maxE-minE+0.2])
-    return fig, ax
+def colorPlot(X, Y, Z):
+    fig, axs = plt.subplots(1,3,figsize=(9,2.13), sharey=True)
+    Len = len(Z)
+    color = 'jet'
+    for i in range(Len):
+        pcm = axs[i].pcolormesh(X, Y, Z[i], vmin=Z.min(), vmax=Z.max(), cmap=color,alpha=0.75)
+        axs[i].set_xlabel(r'$\theta_1/2\pi$',fontsize=12)
+        axs[i].axis([X.min(), X.max(), Y.min(), Y.max()])
+        axs[i].tick_params(axis='both', labelsize=12)
+    axs[0].set_ylabel(r'$\theta_2/2\pi$',fontsize=12)
+    cb = fig.colorbar(pcm, ax=axs, shrink=1, pad=0.01, label=r'$F(\theta_1, \theta_2)$')
+    cb.ax.tick_params(labelsize=12)
+    cb.set_label(label=r'$F(\theta_1, \theta_2)$', weight='normal', size=12)
+    return fig, axs
 
-theta = float(sys.argv[1])
-Nhole = 18
-Vd = float(sys.argv[2]) #displacement field
-Ktot, Evals =  main(theta, Nhole, Vd)
-fig,ax = plot_ED_energies(Ktot, Evals)
-fig.savefig('ED_27sites_nh='+str(Nhole)+'_ep='+str(epsilon_r)+'_theta='+str(round(theta,2))+'_Vd='+str(round(Vd,2))+'.png',bbox_inches='tight',dpi=300)
-fig.savefig('ED_27sites_nh='+str(Nhole)+'_ep='+str(epsilon_r)+'_theta='+str(round(theta,2))+'_Vd='+str(round(Vd,2))+'.pdf',bbox_inches='tight',dpi=300)
+theta = float(sys.argv[2])
+Nx, Ny, Nhole = 3, 3, 6
+Vd = float(sys.argv[3]) #displacement field
+F12, dtheta, ktot =  main(theta,Nx, Ny, Nhole, Vd)
+print(F12)
+dtheta1 = dtheta[:,0].reshape(len(F12[0])+1,len(F12[0])+1)[:-1,:-1]
+dtheta2 = dtheta[:,1].reshape(len(F12[0])+1,len(F12[0])+1)[:-1,:-1]
 
-#folder = "half_fill/"
-#import os
-#fig.savefig(os.path.join(folder, f"ED_6x3_nh={str(Nhole)}_ep={str(epsilon_r)}_theta={str(round(theta,2))}_Vd={str(Vd)}.png"), bbox_inches='tight', dpi=300)
+fig, ax = colorPlot(dtheta1,dtheta2,F12)
+#fig.savefig('manybody_BerryCurvature_N1='+str(Nx)+'_N2='+str(Ny)+'_Nh='+str(Nhole)+'_ep='+str(epsilon_r)+'_theta='+str(round(theta,2))+'_Vd='+str(Vd)+'.png',bbox_inches='tight',dpi=300)
+#fig.savefig('manybody_BerryCurvature_N1='+str(Nx)+'_N2='+str(Ny)+'_Nh='+str(Nhole)+'_ep='+str(epsilon_r)+'_theta='+str(round(theta,2))+'_Vd='+str(Vd)+'.pdf',bbox_inches='tight',dpi=300)
+
 plt.show()
-                
