@@ -1,0 +1,1 @@
+Efficient python code for simulating band structure and topology of continuum model of twisted Mote2 bilayer. This also includes ED code (momentum space) for manybody eigen spectra, charge structure factor, manybody chern number, and manybody entanglement spectra to characterize various topological phases of bilayer systems. 
